@@ -1,6 +1,7 @@
 /**
- * DriftGuard Type Definitions
- * The Data Contract for the "Firewall for Intelligence"
+ * DriftGuard Data Contracts
+ * Defines the core data structures for the "Firewall for Intelligence"
+ * Phase 3: Added Scope Claims and Risk Analysis
  */
 /**
  * Strictness levels define the rigor of validation
@@ -40,28 +41,48 @@ export interface TaskContract {
     taskId: string;
     title: string;
     goal: string;
-    strictness: StrictnessLevel;
     allowedScopes: string[];
     checklist: ChecklistItem[];
-    parentTaskId?: string;
-    createdAt: string;
-    updatedAt: string;
+    strictness: StrictnessLevel;
     testCommand?: string;
     lastIntent?: string;
     filesToTouch?: string[];
+    parentTaskId?: string;
+    subTaskIds?: string[];
+    claims?: ScopeClaim[];
+    riskScore?: number;
+    createdAt: string;
+    updatedAt: string;
+}
+export interface ScopeClaim {
+    path: string;
+    exclusive: boolean;
+    ownerTaskId: string;
+    createdAt: number;
 }
 /**
  * DriftSession represents the current active session state
  * This is the L1 (in-memory) representation that gets persisted to L2
  */
 export interface DriftSession {
-    activeTaskId: string | null;
-    activeStepId: string | null;
+    sessionId: string;
+    startTime: number;
     currentState: FocusState;
-    dirtyBit: boolean;
-    lastSnapshotHash: string;
+    activeTaskId?: string;
+    activeStepId?: string;
+    activeIntent?: string;
     isVerified: boolean;
     intentFiled: boolean;
+    activeClaims?: ScopeClaim[];
+    lastKnownFileHashes?: Record<string, string>;
+}
+export interface HandoffPacket {
+    taskId: string;
+    status: FocusState;
+    planSummary: string;
+    activeClaims: string[];
+    lastSteps: string[];
+    verificationStatus: string;
 }
 /**
  * The complete persisted state stored in tasks.json

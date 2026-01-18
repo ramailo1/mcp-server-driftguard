@@ -1,2 +1,25 @@
+# Dependencies
+node_modules/
 
-.driftguard
+# Build Output
+build/
+dist/
+
+# DriftGuard Local State
+.driftguard/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

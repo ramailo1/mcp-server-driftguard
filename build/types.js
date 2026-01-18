@@ -1,6 +1,7 @@
 /**
- * DriftGuard Type Definitions
- * The Data Contract for the "Firewall for Intelligence"
+ * DriftGuard Data Contracts
+ * Defines the core data structures for the "Firewall for Intelligence"
+ * Phase 3: Added Scope Claims and Risk Analysis
  */
 /**
  * Strictness levels define the rigor of validation

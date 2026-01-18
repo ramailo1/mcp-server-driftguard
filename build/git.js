@@ -227,6 +227,22 @@ export class GitManager {
         this.git = simpleGit(options);
         this._isRepo = null; // Reset cache
     }
+    /**
+     * List files matching patterns
+     */
+    async listFiles(patterns) {
+        if (!(await this.isGitRepo())) {
+            return [];
+        }
+        try {
+            // git ls-files -c -o --exclude-standard -- pathspec...
+            const output = await this.git.raw(['ls-files', '-c', '-o', '--exclude-standard', '--', ...patterns]);
+            return output.split('\n').filter(s => s.trim().length > 0);
+        }
+        catch {
+            return [];
+        }
+    }
 }
 // Export singleton instance
 export const gitManager = GitManager.getInstance();

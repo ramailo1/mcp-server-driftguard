@@ -59,6 +59,10 @@ export declare class GitManager {
      * Update the project path
      */
     setProjectPath(path: string): void;
+    /**
+     * List files matching patterns
+     */
+    listFiles(patterns: string[]): Promise<string[]>;
 }
 export declare const gitManager: GitManager;
 //# sourceMappingURL=git.d.ts.map

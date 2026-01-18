@@ -19,6 +19,8 @@
     ],
     "exclude": [
         "node_modules",
-        "build"
+        "build",
+        "src/audit_drill_*.ts",
+        "src/test.ts"
     ]
 }

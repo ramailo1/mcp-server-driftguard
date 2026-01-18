@@ -265,6 +265,94 @@ server.tool('dg_status', 'Get the current DriftGuard session status without chan
         return formatError(error);
     }
 });
+// ==================== PHASE 3 TOOLS ====================
+// ==================== TOOL: dg_claim_scope ====================
+server.tool('dg_claim_scope', 'Claim exclusive or shared access to a file scope. Required to prevent agent collisions.', {
+    paths: z.array(z.string()).describe('List of glob patterns to claim (e.g. ["src/components/**"])'),
+    exclusive: z.boolean().describe('If true, blocks others from claiming overlapping scopes.')
+}, async ({ paths, exclusive }) => {
+    try {
+        const result = await stateManager.claimScope(paths, exclusive);
+        if (result.granted) {
+            return {
+                content: [{
+                        type: 'text',
+                        text: `✅ Scope Claimed: ${paths.join(', ')}\nMode: ${exclusive ? 'Exclusive' : 'Shared'}`
+                    }]
+            };
+        }
+        else {
+            const conflicts = result.conflicts.map(c => `  - ${c.path} (Owned by ${c.ownerTaskId})`).join('\n');
+            return {
+                isError: true,
+                content: [{
+                        type: 'text',
+                        text: `❌ SCOPE_CONFLICT: Could not claim scope.\n\nConflicts:\n${conflicts}\n\nResolve by waiting or requesting delegation.`
+                    }]
+            };
+        }
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
+// ==================== TOOL: dg_delegate ====================
+server.tool('dg_delegate', 'Delegate a subset of your current scope to a new child task.', {
+    subTaskTitle: z.string().describe('Title for the child task'),
+    subTaskGoal: z.string().describe('Goal for the child task'),
+    subScope: z.array(z.string()).describe('Subset of your current scope to delegate')
+}, async ({ subTaskTitle, subTaskGoal, subScope }) => {
+    try {
+        const subTask = await stateManager.delegateTask(subTaskTitle, subTaskGoal, subScope);
+        return {
+            content: [{
+                    type: 'text',
+                    text: [
+                        `🤝 Task Delegated!`,
+                        '',
+                        `**Child Task ID:** ${subTask.taskId}`,
+                        `**Title:** ${subTask.title}`,
+                        `**Scope:** ${subScope.join(', ')}`,
+                        '',
+                        'The agent responsible for the child task can now `dg_propose_task` (or it is auto-created) and start working.'
+                    ].join('\n')
+                }]
+        };
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
+// ==================== TOOL: dg_analyze_risk ====================
+server.tool('dg_analyze_risk', 'Analyze the "Heat" of a file path based on git history to determine risk.', {
+    path: z.string().describe('File path or Glob pattern to analyze')
+}, async ({ path }) => {
+    try {
+        const result = await stateManager.analyzeRisk(path);
+        let emoji = '🟢';
+        if (result.score > 70)
+            emoji = '🔥';
+        else if (result.score > 40)
+            emoji = '⚠️';
+        return {
+            content: [{
+                    type: 'text',
+                    text: [
+                        `${emoji} Risk Analysis Results`,
+                        '',
+                        `**Target:** \`${path}\``,
+                        `**Risk Score:** ${result.score}/100`,
+                        `**Assessment:** ${result.reason}`,
+                        '',
+                        'High risk suggests using higher strictness (e.g. L3) or requesting human review.'
+                    ].join('\n')
+                }]
+        };
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
 // ==================== PHASE 2 TOOLS ====================
 // ==================== TOOL: dg_report_intent ====================
 server.tool('dg_report_intent', 'Report intent before making changes. Required before dg_checkpoint. Transitions to EXECUTING state.', {
@@ -384,6 +472,94 @@ server.tool('dg_set_test_command', 'Set or update the test command for the activ
                         `**Command:** \`${command}\``,
                         '',
                         'This command will be run when you call `dg_verify`.'
+                    ].join('\n')
+                }]
+        };
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
+// ==================== PHASE 4 TOOLS ====================
+// ==================== TOOL: dg_reset ====================
+server.tool('dg_reset', 'Hard reset DriftGuard state (Safety Valve). Clears all tasks, claims, and history.', {
+    confirm: z.boolean().describe('Must be set to true to confirm deletion')
+}, async ({ confirm }) => {
+    if (!confirm) {
+        return { isError: true, content: [{ type: 'text', text: 'Confirmation required. Usage: dg_reset(confirm=true)' }] };
+    }
+    await stateManager.reset();
+    return {
+        content: [{ type: 'text', text: '💥 DriftGuard State Hard Reset. System is clean.' }]
+    };
+});
+// ==================== TOOL: dg_health_check ====================
+server.tool('dg_health_check', 'Detect "Out-of-Band" changes (manual edits) by comparing current file hashes against the last checkpoint.', {}, async () => {
+    try {
+        const result = await stateManager.healthCheck();
+        if (result.status === 'CLEAN') {
+            return {
+                content: [{ type: 'text', text: '✅ Environment Integrity: CLEAN (No unrecognized edits)' }]
+            };
+        }
+        else if (result.status === 'NO_CLAIMS') {
+            return {
+                content: [{ type: 'text', text: 'ℹ️ No active scope claims. Integrity check skipped.' }]
+            };
+        }
+        return {
+            isError: true, // Warn the AI
+            content: [{
+                    type: 'text',
+                    text: `⚠️ ENVIRONMENT DIRTY: Manual edits detected!\n\nModified Files:\n${result.dirtyFiles.map(f => `  - ${f}`).join('\n')}\n\nRecommendation: Review changes, then run dg_checkpoint to accept them.`
+                }]
+        };
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
+// ==================== TOOL: dg_generate_handoff ====================
+server.tool('dg_generate_handoff', 'Generate a "Resume Packet" to reconstruct context for a new session.', {}, async () => {
+    try {
+        const packet = await stateManager.generateHandoff();
+        return {
+            content: [{
+                    type: 'text',
+                    text: [
+                        `📦 DriftGuard Resume Packet`,
+                        `Task: ${packet.taskId}`,
+                        `Status: ${packet.status}`,
+                        `Plan: ${packet.planSummary}`,
+                        `Claims: ${packet.activeClaims.join(', ') || 'None'}`,
+                        `Verification: ${packet.verificationStatus}`,
+                        '',
+                        '**Recent Activity:**',
+                        ...packet.lastSteps
+                    ].join('\n')
+                }]
+        };
+    }
+    catch (error) {
+        return formatError(error);
+    }
+});
+// ==================== TOOL: dg_get_timeline ====================
+server.tool('dg_get_timeline', 'Retrieve chronological history from L3 Git Notes.', {
+    limit: z.number().optional().describe('Metrics of history entries to retrieve (default: 10)')
+}, async ({ limit }) => {
+    try {
+        const history = await stateManager.getTimeline(limit || 10);
+        if (history.length === 0) {
+            return { content: [{ type: 'text', text: 'No history found (L3 Git Notes empty).' }] };
+        }
+        const formatEntry = (h) => `[${h.timestamp}] ${h.intent} -> ${h.summary} (${h.filesChanged.length} files)`;
+        return {
+            content: [{
+                    type: 'text',
+                    text: [
+                        `📜 Project Timeline (Last ${history.length})`,
+                        ...history.map(formatEntry)
                     ].join('\n')
                 }]
         };

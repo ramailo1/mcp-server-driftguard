@@ -1,6 +1,7 @@
 /**
- * DriftGuard Type Definitions
- * The Data Contract for the "Firewall for Intelligence"
+ * DriftGuard Data Contracts
+ * Defines the core data structures for the "Firewall for Intelligence"
+ * Phase 3: Added Scope Claims and Risk Analysis
  */
 
 /**
@@ -44,16 +45,31 @@ export interface TaskContract {
     taskId: string;
     title: string;
     goal: string;
-    strictness: StrictnessLevel;
-    allowedScopes: string[]; // Glob patterns (e.g., "src/**/*.ts")
+    allowedScopes: string[]; // Access Control Lists (ACLs) - Glob patterns
     checklist: ChecklistItem[];
-    parentTaskId?: string;
+    strictness: StrictnessLevel;
+
+    // Phase 2
+    testCommand?: string;
+    lastIntent?: string; // Stored intent from dg_report_intent
+    filesToTouch?: string[]; // Files declared in intent
+
+    // Phase 3
+    parentTaskId?: string; // For delegated tasks
+    subTaskIds?: string[]; // IDs of spawned child tasks
+    claims?: ScopeClaim[]; // Active scope claims
+    riskScore?: number; // 0-100 calculated risk
+
     createdAt: string;
     updatedAt: string;
-    // Phase 2 additions
-    testCommand?: string;  // Command to run for verification (e.g., "npm test")
-    lastIntent?: string;   // The last intent reported by the agent
-    filesToTouch?: string[]; // Files declared in intent
+}
+
+// Phase 3: Scope Claim
+export interface ScopeClaim {
+    path: string;       // Glob pattern (e.g., "src/components/**")
+    exclusive: boolean; // If true, no other taskId can claim an overlapping path
+    ownerTaskId: string;
+    createdAt: number;
 }
 
 /**
@@ -61,14 +77,32 @@ export interface TaskContract {
  * This is the L1 (in-memory) representation that gets persisted to L2
  */
 export interface DriftSession {
-    activeTaskId: string | null;
-    activeStepId: string | null;
+    sessionId: string;
+    startTime: number;
     currentState: FocusState;
-    dirtyBit: boolean;        // Placeholder for file change detection
-    lastSnapshotHash: string; // Git HEAD hash or FS hash
-    // Phase 2 additions
-    isVerified: boolean;      // True if dg_verify has passed for the current step
-    intentFiled: boolean;     // True if dg_report_intent was called
+    activeTaskId?: string;
+    activeStepId?: string;
+
+    // Phase 2
+    activeIntent?: string; // Transient intent for current step
+    isVerified: boolean; // Has dg_verify passed for current changes?
+    intentFiled: boolean; // Has dg_report_intent been called?
+
+    // Phase 3
+    activeClaims?: ScopeClaim[]; // Cache of currently active claims for quick lookup
+
+    // Phase 4
+    lastKnownFileHashes?: Record<string, string>; // path -> hash (for Integrity Check)
+}
+
+// Phase 4: Handoff Packet
+export interface HandoffPacket {
+    taskId: string;
+    status: FocusState;
+    planSummary: string;
+    activeClaims: string[]; // Paths
+    lastSteps: string[];    // Last 3 log entries
+    verificationStatus: string;
 }
 
 /**

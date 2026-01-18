@@ -1,17 +1,25 @@
 {
-  "name": "mcp-server-driftguard",
-  "version": "1.0.0",
+  "name": "@soufienne/mcp-server-driftguard",
+  "version": "4.0.0",
   "description": "A Firewall for Intelligence - MCP server that enforces strict state machine for agentic coding",
   "type": "module",
   "main": "build/index.js",
+  "types": "build/index.d.ts",
   "bin": {
     "mcp-server-driftguard": "build/index.js"
   },
+  "files": [
+    "build/**/*",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node build/index.js",
-    "inspect": "set DANGEROUSLY_OMIT_AUTH=true && npx @modelcontextprotocol/inspector node build/index.js"
+    "inspect": "set DANGEROUSLY_OMIT_AUTH=true && npx @modelcontextprotocol/inspector node build/index.js",
+    "prepublishOnly": "npm run build",
+    "clean": "rimraf build"
   },
   "keywords": [
     "mcp",
@@ -19,12 +27,29 @@
     "ai",
     "agents",
     "drift-guard",
-    "state-machine"
+    "state-machine",
+    "git-notes",
+    "audit-trail",
+    "scope-claims",
+    "ai-guardrails"
   ],
-  "author": "",
+  "author": "Soufiane <ramailorakou@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ramailo1/mcp-server-driftguard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ramailo1/mcp-server-driftguard/issues"
+  },
+  "homepage": "https://github.com/ramailo1/mcp-server-driftguard#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@types/minimatch": "^5.1.2",
+    "minimatch": "^10.1.1",
     "simple-git": "^3.30.0",
     "uuid": "^9.0.0",
     "zod": "^3.22.0"
@@ -32,6 +57,7 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/uuid": "^9.0.0",
+    "rimraf": "^5.0.0",
     "typescript": "^5.3.0"
   }
 }

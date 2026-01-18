@@ -24,16 +24,23 @@ import {
     IntentMissingError,
     VerifyResult,
     ExplainResult,
-    GitNoteMetadata
+    GitNoteMetadata,
+    ScopeClaim,
+    // Phase 4
+    HandoffPacket
 } from './types.js';
 import { gitManager } from './git.js';
+import { scopeManager } from './scope.js';
+import { riskAnalyzer } from './risk.js';
+import { createHash } from 'crypto';
+import { minimatch } from 'minimatch';
 
 const execAsync = promisify(exec);
 
 const DRIFTGUARD_DIR = '.driftguard';
 const TASKS_FILE = 'tasks.json';
 const ACTIVE_PLAN_FILE = 'ACTIVE_PLAN.md';
-const STATE_VERSION = '2.0.0'; // Updated for Phase 2
+const STATE_VERSION = '3.0.0'; // Updated for Phase 3
 
 /**
  * StateManager Singleton
@@ -67,14 +74,17 @@ export class StateManager {
         return {
             version: STATE_VERSION,
             session: {
-                activeTaskId: null,
-                activeStepId: null,
+                sessionId: uuidv4(),
+                startTime: Date.now(),
                 currentState: FocusState.IDLE,
-                dirtyBit: false,
-                lastSnapshotHash: '',
+                // Optional fields undefined by default
                 // Phase 2 additions
                 isVerified: false,
-                intentFiled: false
+                intentFiled: false,
+                // Phase 3 additions
+                activeClaims: [],
+                // Phase 4 additions
+                lastKnownFileHashes: {}
             },
             tasks: {},
             logs: []
@@ -168,6 +178,16 @@ export class StateManager {
                 lines.push(`- \`${scope}\``);
             });
             lines.push('');
+
+            // Phase 3: Active Scope Claims
+            if (task.claims && task.claims.length > 0) {
+                lines.push('**Active Scope Claims (LOCKED):**');
+                task.claims.forEach(claim => {
+                    lines.push(`- \`${claim.path}\` ${claim.exclusive ? '(Exclusive)' : ''}`);
+                });
+                lines.push('');
+            }
+
             lines.push('### Checklist');
             lines.push('');
             task.checklist.forEach(item => {
@@ -209,7 +229,6 @@ export class StateManager {
 
         lines.push('');
         lines.push('---');
-        lines.push('');
         lines.push('## 📜 Recent Activity');
         lines.push('');
 
@@ -409,31 +428,33 @@ export class StateManager {
         const taskId = `task_${uuidv4().slice(0, 8)}`;
         const now = new Date().toISOString();
 
-        // Create task contract
-        const task: TaskContract = {
+        // Create and register the task
+        const newTask: TaskContract = {
             taskId,
             title,
             goal,
-            strictness: strictness ?? StrictnessLevel.L2_LOGGED,
-            allowedScopes,
+            allowedScopes: allowedScopes || ['**'],
             checklist: checklist.map(item => ({
                 id: item.id,
                 text: item.text,
                 status: 'todo' as const
             })),
+            strictness: strictness ?? StrictnessLevel.L2_LOGGED,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            // Phase 3 properties
+            subTaskIds: [],
+            claims: []
         };
 
-        // Update state
-        this.state.tasks[taskId] = task;
-        this.state.session.activeTaskId = taskId;
-        this.state.session.currentState = FocusState.PLANNING;
 
+
+        this.state.tasks[taskId] = newTask;
+        this.state.session.activeTaskId = taskId; // Set focus
         this.log('dg_propose_task', taskId, `Task proposed: ${title}`);
         await this.syncToDisk();
 
-        return task;
+        return newTask;
     }
 
     /**
@@ -497,10 +518,17 @@ export class StateManager {
         // Check if all items are done
         const allDone = task.checklist.every(item => item.status === 'done');
 
-        // Phase 2: Write L3 Git Note
-        let gitNoteWritten = false;
-        try {
-            const changedFiles = await gitManager.getChangedFiles();
+        const result: CheckpointResult = {
+            status: 'saved',
+            taskId,
+            completedItems: task.checklist.filter(i => i.status === 'done').length,
+            totalItems: task.checklist.length,
+            gitNoteWritten: false
+        };
+
+        // Write L3 Git Note if in a repo
+        const changedFiles = await gitManager.getChangedFiles();
+        if (await gitManager.isGitRepo() && changedFiles.length > 0) {
             const noteMetadata: GitNoteMetadata = {
                 taskId,
                 title: task.title,
@@ -509,34 +537,41 @@ export class StateManager {
                 timestamp: new Date().toISOString(),
                 filesChanged: changedFiles
             };
-            gitNoteWritten = await gitManager.writeNote(noteMetadata);
-        } catch (error) {
-            // L3 failure should not block L2 save - log and continue
-            this.log('dg_checkpoint', taskId, `L3 Git Note failed: ${error}`);
+            result.gitNoteWritten = await gitManager.writeNote(noteMetadata);
+        }
+
+        // Phase 4: Update hashes before releasing
+        if (task.claims) {
+            const activePatterns = task.claims.map(c => c.path);
+            const hashes = await this.calculateFileHashes(activePatterns);
+            this.state.session.lastKnownFileHashes = {
+                ...(this.state.session.lastKnownFileHashes || {}),
+                ...hashes
+            };
+        }
+
+        // Release Active Claims
+        if (task.claims) {
+            task.claims = [];
+            this.refreshActiveClaims();
         }
 
         // Update session state
         this.state.session.currentState = FocusState.IDLE;
-        this.state.session.activeStepId = null;
+        this.state.session.activeStepId = undefined;
         // Phase 2: Reset flags
         this.state.session.intentFiled = false;
         this.state.session.isVerified = false;
 
         // If all done, clear active task
         if (allDone) {
-            this.state.session.activeTaskId = null;
+            this.state.session.activeTaskId = undefined;
         }
 
         this.log('dg_checkpoint', taskId, summary);
         await this.syncToDisk();
 
-        return {
-            status: 'saved',
-            taskId,
-            completedItems: task.checklist.filter(i => i.status === 'done').length,
-            totalItems: task.checklist.length,
-            gitNoteWritten
-        };
+        return result;
     }
 
     /**
@@ -706,6 +741,238 @@ export class StateManager {
 
         this.log('set_test_command', taskId, command);
         await this.syncToDisk();
+    }
+
+    /**
+     * Phase 3: Claim a Scope
+     */
+    public async claimScope(paths: string[], exclusive: boolean): Promise<{ granted: boolean, conflicts: ScopeClaim[] }> {
+        const taskId = this.state.session.activeTaskId;
+        if (!taskId) {
+            throw new Error("No active task to claim scope for.");
+        }
+
+        const task = this.state.tasks[taskId];
+        if (!task.claims) task.claims = [];
+
+        // Collect all active claims from session
+        const allActiveClaims = this.state.session.activeClaims || [];
+
+        const conflicts: ScopeClaim[] = [];
+        const newClaims: ScopeClaim[] = [];
+
+        for (const path of paths) {
+            const conflict = scopeManager.checkConflict(path, taskId, allActiveClaims, this.state.tasks);
+            if (conflict) {
+                conflicts.push(conflict);
+            } else {
+                newClaims.push({
+                    path,
+                    exclusive,
+                    ownerTaskId: taskId,
+                    createdAt: Date.now()
+                });
+            }
+        }
+
+        if (conflicts.length > 0) {
+            // Reject ALL if any conflict exists (Atomic claim)
+            return { granted: false, conflicts };
+        }
+
+        // Commit claims
+        task.claims.push(...newClaims);
+        this.refreshActiveClaims();
+
+        // Phase 4: Snapshot hashes for integrity
+        const activePatterns = task.claims.map(c => c.path);
+        const hashes = await this.calculateFileHashes(activePatterns);
+        this.state.session.lastKnownFileHashes = {
+            ...(this.state.session.lastKnownFileHashes || {}),
+            ...hashes
+        };
+
+        this.log('dg_claim_scope', taskId, `Granted active claims: ${newClaims.map(c => c.path).join(', ')}`);
+        await this.syncToDisk();
+
+        return { granted: true, conflicts: [] };
+    }
+
+    /**
+     * Phase 3: Delegate Task/Scope
+     */
+    public async delegateTask(
+        subTaskTitle: string,
+        subTaskGoal: string,
+        subScope: string[]
+    ): Promise<TaskContract> {
+        this.validateTransition('dg_delegate', [FocusState.EXECUTING]);
+
+        const parentTaskId = this.state.session.activeTaskId!;
+        const parentTask = this.state.tasks[parentTaskId];
+        const parentClaims = parentTask.claims?.map(c => c.path) || [];
+
+        if (!scopeManager.validateDelegation(parentClaims, subScope)) {
+            if (parentClaims.length > 0) {
+                throw new Error("Delegation Failed: Child scope is not contained within Parent's active claims.");
+            }
+        }
+
+        // Utilize proposeTask but we need to patch the parentTaskId and currentState
+        // because proposeTask changes state to PLANNING. 
+        // Delegation should keep us in EXECUTING? Or switch to the child?
+        // Manifesto: "Spawns a child task that inherits..."
+        // Taking the logic from my previous attempt:
+
+        const subTaskId = `sub_${uuidv4().substring(0, 8)}`;
+        const now = new Date().toISOString();
+
+        const subTask: TaskContract = {
+            taskId: subTaskId,
+            title: subTaskTitle,
+            goal: subTaskGoal,
+            allowedScopes: subScope,
+            checklist: [],
+            strictness: parentTask.strictness,
+            createdAt: now,
+            updatedAt: now,
+            parentTaskId: parentTaskId,
+            subTaskIds: [],
+            claims: []
+        };
+
+        if (!parentTask.subTaskIds) parentTask.subTaskIds = [];
+        parentTask.subTaskIds.push(subTaskId);
+
+        this.state.tasks[subTaskId] = subTask;
+
+        this.log('dg_delegate', parentTaskId, `Delegated sub-task ${subTaskId}: ${subTaskTitle}`);
+        await this.syncToDisk();
+
+        return subTask;
+    }
+
+    /**
+     * Phase 3: Analyze Risk
+     */
+    public async analyzeRisk(targetPath: string): Promise<{ score: number, reason: string }> {
+        const result = await riskAnalyzer.calculateRisk(this.projectPath, targetPath);
+
+        const taskId = this.state.session.activeTaskId;
+        if (taskId) {
+            const task = this.state.tasks[taskId];
+            task.riskScore = Math.max(task.riskScore || 0, result.score);
+        }
+
+        return result;
+    }
+
+    /**
+     * Helper to refresh the activeClaims cache in session
+     */
+    private refreshActiveClaims() {
+        const claims: ScopeClaim[] = [];
+        for (const task of Object.values(this.state.tasks)) {
+            if (task.claims) {
+                claims.push(...task.claims);
+            }
+        }
+        this.state.session.activeClaims = claims;
+    }
+
+    /**
+     * Phase 4: Calculate MD5 hashes for files matching patterns
+     */
+    private async calculateFileHashes(patterns: string[]): Promise<Record<string, string>> {
+        const hashes: Record<string, string> = {};
+        if (patterns.length === 0) return hashes;
+
+        const files = await gitManager.listFiles(patterns);
+        for (const file of files) {
+            try {
+                const content = await fs.readFile(path.join(this.projectPath, file));
+                const hash = createHash('md5').update(content).digest('hex');
+                hashes[file] = hash;
+            } catch {
+                // Skip missing files
+            }
+        }
+        return hashes;
+    }
+
+    /**
+     * Phase 4: Check environment integrity
+     */
+    public async healthCheck(): Promise<{ status: 'CLEAN' | 'DIRTY' | 'NO_CLAIMS', dirtyFiles: string[] }> {
+        const claims = this.state.session.activeClaims || [];
+        if (claims.length === 0) {
+            return { status: 'NO_CLAIMS', dirtyFiles: [] };
+        }
+
+        const patterns = claims.map(c => c.path);
+        const currentHashes = await this.calculateFileHashes(patterns);
+        const knownHashes = this.state.session.lastKnownFileHashes || {};
+        const dirtyFiles: string[] = [];
+
+        // Check for modified or new files
+        for (const [file, currentHash] of Object.entries(currentHashes)) {
+            const known = knownHashes[file];
+            if (!known) {
+                dirtyFiles.push(`${file} (NEW)`);
+            } else if (known !== currentHash) {
+                dirtyFiles.push(`${file} (MODIFIED)`);
+            }
+        }
+
+        // Check for deleted files
+        for (const [file, known] of Object.entries(knownHashes)) {
+            if (!currentHashes[file]) {
+                const inScope = patterns.some(p => minimatch(file, p));
+                if (inScope) {
+                    dirtyFiles.push(`${file} (DELETED)`);
+                }
+            }
+        }
+
+        if (dirtyFiles.length > 0) {
+            return { status: 'DIRTY', dirtyFiles };
+        }
+        return { status: 'CLEAN', dirtyFiles: [] };
+    }
+
+    /**
+     * Phase 4: Generate Handoff Packet
+     */
+    public async generateHandoff(): Promise<HandoffPacket> {
+        const taskId = this.state.session.activeTaskId;
+        const task = taskId ? this.state.tasks[taskId] : null;
+
+        let planSummary = "No active task";
+        if (task) {
+            const done = task.checklist.filter(i => i.status === 'done').length;
+            const total = task.checklist.length;
+            planSummary = `${done} of ${total} items completed. Goal: ${task.goal}`;
+        }
+
+        const activeClaims = this.state.session.activeClaims?.map(c => c.path) || [];
+        const logs = this.state.logs.slice(-3).map(l => `[${l.action}] ${l.details || ''}`);
+
+        return {
+            taskId: taskId || 'None',
+            status: this.state.session.currentState,
+            planSummary,
+            activeClaims,
+            lastSteps: logs,
+            verificationStatus: this.state.session.isVerified ? 'VERIFIED' : 'PENDING'
+        };
+    }
+
+    /**
+     * Phase 4: Get Timeline
+     */
+    public async getTimeline(limit = 10): Promise<GitNoteMetadata[]> {
+        const history = await gitManager.reconstructHistory();
+        return history.slice(0, limit);
     }
 
     /**
